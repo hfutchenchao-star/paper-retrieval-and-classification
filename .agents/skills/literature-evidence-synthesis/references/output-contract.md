@@ -27,6 +27,9 @@
 - generation date;
 - sources and exact search queries;
 - counts found, deduplicated, selected, summarized, and omitted;
+- requested paper count and any retrieval shortfall;
+- a `领域核心问题` section derived only from papers with an identifiable problem;
+- for every core problem: definition, cross-paper synthesis, supporting-paper count, and representative papers;
 - category descriptions and counts;
 - an index linking to every paper's `summary.md`;
 - full-text and abstract-only counts.
@@ -94,4 +97,7 @@ Do not create category folders for:
 - unselected records;
 - excluded records;
 - records with `analysis_status: insufficient_text`;
+- records with `analysis_status: no_identifiable_problem`;
 - records lacking a complete problem, method, results, conclusion, summary, category, or category reason.
+
+Keep skipped records in `_data/papers.jsonl`. A record with `analysis_status: no_identifiable_problem` must include `skip_reason` and must not have a `summary.md`.
