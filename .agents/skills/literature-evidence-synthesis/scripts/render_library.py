@@ -34,6 +34,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--field", required=True)
     parser.add_argument("--from-year", type=int, required=True)
     parser.add_argument("--to-year", type=int, required=True)
+    parser.add_argument(
+        "--requested-count",
+        type=int,
+        default=50,
+        help="Requested paper count before papers without an identifiable problem are skipped.",
+    )
     return parser.parse_args()
 
 
@@ -150,6 +156,8 @@ def main() -> int:
     args = parse_args()
     if args.from_year > args.to_year:
         raise SystemExit("--from-year cannot be greater than --to-year")
+    if args.requested_count < 1:
+        raise SystemExit("--requested-count must be at least 1")
     if not args.input.exists():
         raise SystemExit(f"Missing input: {args.input}")
     if not args.taxonomy.exists():
@@ -163,12 +171,30 @@ def main() -> int:
 
     category_order: dict[str, int] = {}
     category_definitions: dict[str, str] = {}
+    category_syntheses: dict[str, str] = {}
+    category_core_flags: dict[str, bool] = {}
+    category_representatives: dict[str, list[str]] = {}
     for fallback_order, item in enumerate(categories, 1):
+        if not isinstance(item, dict):
+            continue
         name = clean(item.get("name"), "")
         if not name:
             continue
         category_order[name] = int(item.get("order") or fallback_order)
         category_definitions[name] = clean(item.get("definition"), "未提供分类定义")
+        category_syntheses[name] = clean(
+            item.get("synthesis"), category_definitions[name]
+        )
+        paper_ids = item.get("paper_ids") if isinstance(item.get("paper_ids"), list) else []
+        category_core_flags[name] = bool(
+            item.get("is_core", len(paper_ids) >= 2)
+        )
+        representatives = item.get("representative_paper_ids")
+        category_representatives[name] = (
+            [clean(value, "") for value in representatives if clean(value, "")]
+            if isinstance(representatives, list)
+            else []
+        )
 
     rendered_records = [record for record in records if eligible(record)]
     unlisted = sorted(
@@ -179,6 +205,9 @@ def main() -> int:
     for name in unlisted:
         category_order[name] = next_order
         category_definitions[name] = "该分类存在于论文记录中，但尚未写入 taxonomy.json。"
+        category_syntheses[name] = category_definitions[name]
+        category_core_flags[name] = False
+        category_representatives[name] = []
         next_order += 1
 
     by_category: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -210,11 +239,21 @@ def main() -> int:
 
     sources, queries, raw_returned = search_details(args.input.parent / "search-log.jsonl")
     counts = Counter(clean(record.get("category")) for record in rendered_records)
+    paper_by_id = {
+        clean(record.get("paper_id")): record
+        for record in rendered_records
+        if record.get("paper_id")
+    }
     full_text_count = sum(record.get("reading_scope") == "full_text" for record in rendered_records)
     abstract_count = sum(record.get("reading_scope") == "abstract" for record in rendered_records)
-    omitted_count = sum(
+    insufficient_text_count = sum(
         record.get("analysis_status") == "insufficient_text" for record in records
     )
+    no_problem_count = sum(
+        record.get("analysis_status") == "no_identifiable_problem" for record in records
+    )
+    selected_count = sum(record.get("selected") is True for record in records)
+    retrieval_shortfall = max(0, args.requested_count - selected_count)
     generated_at = dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
 
     lines = [
@@ -224,13 +263,16 @@ def main() -> int:
         f"- 生成时间：{generated_at}",
         f"- 数据来源：{'、'.join(sources) or '未记录'}",
         f"- 查询式数量：{len(queries)}",
+        f"- 目标检索数量：{args.requested_count}",
         f"- 各来源累计返回：{raw_returned}",
         f"- 去重后记录：{len(records)}",
-        f"- 被选中：{sum(record.get('selected') is True for record in records)}",
+        f"- 被选中：{selected_count}",
+        f"- 检索数量缺口：{retrieval_shortfall}",
         f"- 已生成总结：{len(rendered_records)}",
         f"- 全文总结：{full_text_count}",
         f"- 摘要总结：{abstract_count}",
-        f"- 因缺少摘要或全文而未生成：{omitted_count}",
+        f"- 因缺少摘要或全文而跳过：{insufficient_text_count}",
+        f"- 因未识别到明确论文问题而跳过：{no_problem_count}",
         "",
         "## 检索词",
         "",
@@ -238,6 +280,42 @@ def main() -> int:
     lines.extend(f"- {query}" for query in queries)
     if not queries:
         lines.append("- 未记录")
+    lines.extend(["", "## 领域核心问题", ""])
+    core_names = [name for name in ordered_names if category_core_flags.get(name)]
+    if not core_names:
+        lines.append("当前有效论文样本中没有形成由至少两篇论文共同支持的稳定核心问题。")
+        lines.append("")
+    for name in core_names:
+        representative_ids = [
+            paper_id
+            for paper_id in category_representatives.get(name, [])
+            if paper_id in paper_by_id
+        ]
+        if not representative_ids:
+            representative_ids = [
+                clean(record.get("paper_id"))
+                for record in by_category[name][:3]
+                if record.get("paper_id")
+            ]
+        representative_links = []
+        for paper_id in representative_ids[:3]:
+            record = paper_by_id[paper_id]
+            path = rendered_paths[paper_id].relative_to(args.output)
+            target = urllib.parse.quote(path.as_posix())
+            representative_links.append(
+                f"[{clean(record.get('title'))}]({target})"
+            )
+        lines.extend(
+            [
+                f"### {category_order[name]:02d} — {name}",
+                "",
+                f"- 问题定义：{category_definitions[name]}",
+                f"- 跨论文归纳：{category_syntheses[name]}",
+                f"- 支持论文数：{counts[name]}",
+                f"- 代表论文：{'；'.join(representative_links) or '未指定'}",
+                "",
+            ]
+        )
     lines.extend(["", "## 分类", ""])
     for name in ordered_names:
         lines.extend(
@@ -245,6 +323,7 @@ def main() -> int:
                 f"### {category_order[name]:02d} — {name}",
                 "",
                 f"- 定义：{category_definitions[name]}",
+                f"- 是否为核心问题：{'是' if category_core_flags.get(name) else '否'}",
                 f"- 论文数量：{counts[name]}",
                 "",
             ]
@@ -272,7 +351,8 @@ def main() -> int:
     )
     print(
         f"Reading scope: {full_text_count} full text, {abstract_count} abstract; "
-        f"omitted for insufficient text: {omitted_count}"
+        f"skipped for insufficient text: {insufficient_text_count}; "
+        f"skipped for no identifiable problem: {no_problem_count}"
     )
     return 0
 
