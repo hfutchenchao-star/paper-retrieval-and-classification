@@ -29,6 +29,7 @@ Use this schema for each object in `_data/papers.jsonl`.
 {
   "selected": true,
   "analysis_status": "complete",
+  "skip_reason": null,
   "reading_scope": "abstract",
   "problem": "The concrete problem or gap addressed by the paper.",
   "method": "The data, model, experiment, or approach used.",
@@ -43,7 +44,7 @@ Use this schema for each object in `_data/papers.jsonl`.
 
 Allowed values:
 
-- `analysis_status`: `pending`, `complete`, `insufficient_text`, `excluded`
+- `analysis_status`: `pending`, `complete`, `insufficient_text`, `no_identifiable_problem`, `excluded`
 - `reading_scope`: `abstract`, `full_text`
 
 ## Analysis rules
@@ -55,6 +56,8 @@ Allowed values:
 5. Keep the original title and bibliographic fields.
 6. Do not summarize from metadata alone.
 7. Use Chinese for analysis fields unless the user asks for another language.
+8. Require source-text support for `problem`. Do not derive it from the title, keywords, task name, or method alone.
+9. If the abstract or full text does not identify a concrete problem, keep `selected: true`, set `analysis_status` to `no_identifiable_problem`, write `skip_reason`, and leave `problem`, `category`, and summary fields empty.
 
 ## Example transformation
 
