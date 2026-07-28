@@ -29,10 +29,11 @@
 - counts found, deduplicated, selected, summarized, and omitted;
 - requested paper count and any retrieval shortfall;
 - a `领域核心问题` section derived only from papers with an identifiable problem;
-- for every core problem: definition, cross-paper synthesis, supporting-paper count, and representative papers;
-- category descriptions and counts;
-- an index linking to every paper's `summary.md`;
+- for every core problem: definition, cross-paper synthesis, and supporting-paper count;
 - full-text and abstract-only counts.
+- confirmation that every rendered paper has a source-verifiable problem-evidence excerpt.
+
+Do not include `## 分类` or `## 论文索引` sections in the overview. Do not include a `代表论文` field under core problems. The category folders themselves remain the browsing interface.
 
 ## Paper directory
 
@@ -61,6 +62,12 @@ Every `summary.md` must contain:
 ## 论文解决了什么问题
 
 ...
+
+## 问题证据
+
+- 原文摘录：
+- 证据来源：摘要 / 全文
+- 位置：
 
 ## 使用了什么方法
 
@@ -98,6 +105,6 @@ Do not create category folders for:
 - excluded records;
 - records with `analysis_status: insufficient_text`;
 - records with `analysis_status: no_identifiable_problem`;
-- records lacking a complete problem, method, results, conclusion, summary, category, or category reason.
+- records lacking valid problem evidence, a complete individualized problem, method, results, conclusion, summary, category, or category reason.
 
-Keep skipped records in `_data/papers.jsonl`. A record with `analysis_status: no_identifiable_problem` must include `skip_reason` and must not have a `summary.md`.
+Keep skipped records in `_data/papers.jsonl`. A record with `analysis_status: no_identifiable_problem` must include `skip_reason`, must leave `problem_evidence` and classification fields empty, and must not have a `summary.md`.

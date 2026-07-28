@@ -1,4 +1,4 @@
 interface:
-  display_name: "领域论文搜集、分类与总结"
-  short_description: "检索论文，跳过无明确问题的记录，提炼领域核心问题并分类生成 Markdown"
-  default_prompt: "Use $literature-evidence-synthesis to find the requested number of papers in my field (default 50), ask for the year range if missing, skip papers with no identifiable problem, synthesize core field problems, classify valid papers, and create one summary.md per paper."
+  display_name: "领域论文搜集、问题归纳与分类"
+  short_description: "逐篇核验原文问题证据，归纳核心问题并生成可浏览分类文献库"
+  default_prompt: "Use $literature-evidence-synthesis to find papers in my field and years, identify each paper's concrete problem from source evidence, derive problem-based categories, and create a validated Markdown library."

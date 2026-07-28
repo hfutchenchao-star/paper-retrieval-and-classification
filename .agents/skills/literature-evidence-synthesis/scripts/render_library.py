@@ -8,13 +8,13 @@ import datetime as dt
 import json
 import re
 import unicodedata
-import urllib.parse
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
 
 ANALYSIS_FIELDS = (
+    "problem_evidence",
     "problem",
     "method",
     "results",
@@ -38,7 +38,7 @@ def parse_args() -> argparse.Namespace:
         "--requested-count",
         type=int,
         default=50,
-        help="Requested paper count before papers without an identifiable problem are skipped.",
+        help="Requested number of final evidence-grounded paper summaries.",
     )
     return parser.parse_args()
 
@@ -83,11 +83,14 @@ def paper_folder_base(record: dict[str, Any]) -> str:
 
 
 def eligible(record: dict[str, Any]) -> bool:
+    evidence = record.get("problem_evidence")
     return (
         record.get("selected") is True
         and record.get("analysis_status") == "complete"
         and record.get("reading_scope") in {"abstract", "full_text"}
         and all(record.get(field) not in (None, "") for field in ANALYSIS_FIELDS)
+        and isinstance(evidence, dict)
+        and all(evidence.get(field) not in (None, "") for field in ("quote", "source", "location"))
     )
 
 
@@ -95,6 +98,8 @@ def summary_markdown(record: dict[str, Any]) -> str:
     doi = clean(record.get("doi"))
     url = clean(record.get("url"))
     scope = "全文" if record.get("reading_scope") == "full_text" else "摘要"
+    evidence = record.get("problem_evidence") or {}
+    evidence_scope = "全文" if evidence.get("source") == "full_text" else "摘要"
     return f"""<!-- paper_id: {clean(record.get("paper_id"))} -->
 # {clean(record.get("title"))}
 
@@ -108,6 +113,12 @@ def summary_markdown(record: dict[str, Any]) -> str:
 ## 论文解决了什么问题
 
 {clean(record.get("problem"))}
+
+## 问题证据
+
+- 原文摘录：{clean(evidence.get("quote"))}
+- 证据来源：{evidence_scope}
+- 位置：{clean(evidence.get("location"))}
 
 ## 使用了什么方法
 
@@ -173,7 +184,6 @@ def main() -> int:
     category_definitions: dict[str, str] = {}
     category_syntheses: dict[str, str] = {}
     category_core_flags: dict[str, bool] = {}
-    category_representatives: dict[str, list[str]] = {}
     for fallback_order, item in enumerate(categories, 1):
         if not isinstance(item, dict):
             continue
@@ -189,12 +199,6 @@ def main() -> int:
         category_core_flags[name] = bool(
             item.get("is_core", len(paper_ids) >= 2)
         )
-        representatives = item.get("representative_paper_ids")
-        category_representatives[name] = (
-            [clean(value, "") for value in representatives if clean(value, "")]
-            if isinstance(representatives, list)
-            else []
-        )
 
     rendered_records = [record for record in records if eligible(record)]
     unlisted = sorted(
@@ -207,7 +211,6 @@ def main() -> int:
         category_definitions[name] = "该分类存在于论文记录中，但尚未写入 taxonomy.json。"
         category_syntheses[name] = category_definitions[name]
         category_core_flags[name] = False
-        category_representatives[name] = []
         next_order += 1
 
     by_category: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -215,7 +218,6 @@ def main() -> int:
         by_category[clean(record.get("category"))].append(record)
 
     args.output.mkdir(parents=True, exist_ok=True)
-    rendered_paths: dict[str, Path] = {}
     used_paths: set[Path] = set()
     ordered_names = sorted(by_category, key=lambda name: (category_order.get(name, 9999), name.casefold()))
     for category_name in ordered_names:
@@ -235,15 +237,9 @@ def main() -> int:
             paper_dir.mkdir(parents=True, exist_ok=True)
             summary_path = paper_dir / "summary.md"
             summary_path.write_text(summary_markdown(record), encoding="utf-8")
-            rendered_paths[clean(record.get("paper_id"))] = summary_path
 
     sources, queries, raw_returned = search_details(args.input.parent / "search-log.jsonl")
     counts = Counter(clean(record.get("category")) for record in rendered_records)
-    paper_by_id = {
-        clean(record.get("paper_id")): record
-        for record in rendered_records
-        if record.get("paper_id")
-    }
     full_text_count = sum(record.get("reading_scope") == "full_text" for record in rendered_records)
     abstract_count = sum(record.get("reading_scope") == "abstract" for record in rendered_records)
     insufficient_text_count = sum(
@@ -253,7 +249,7 @@ def main() -> int:
         record.get("analysis_status") == "no_identifiable_problem" for record in records
     )
     selected_count = sum(record.get("selected") is True for record in records)
-    retrieval_shortfall = max(0, args.requested_count - selected_count)
+    retrieval_shortfall = max(0, args.requested_count - len(rendered_records))
     generated_at = dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
 
     lines = [
@@ -269,6 +265,7 @@ def main() -> int:
         f"- 被选中：{selected_count}",
         f"- 检索数量缺口：{retrieval_shortfall}",
         f"- 已生成总结：{len(rendered_records)}",
+        f"- 具有可核验问题证据：{len(rendered_records)}",
         f"- 全文总结：{full_text_count}",
         f"- 摘要总结：{abstract_count}",
         f"- 因缺少摘要或全文而跳过：{insufficient_text_count}",
@@ -286,25 +283,6 @@ def main() -> int:
         lines.append("当前有效论文样本中没有形成由至少两篇论文共同支持的稳定核心问题。")
         lines.append("")
     for name in core_names:
-        representative_ids = [
-            paper_id
-            for paper_id in category_representatives.get(name, [])
-            if paper_id in paper_by_id
-        ]
-        if not representative_ids:
-            representative_ids = [
-                clean(record.get("paper_id"))
-                for record in by_category[name][:3]
-                if record.get("paper_id")
-            ]
-        representative_links = []
-        for paper_id in representative_ids[:3]:
-            record = paper_by_id[paper_id]
-            path = rendered_paths[paper_id].relative_to(args.output)
-            target = urllib.parse.quote(path.as_posix())
-            representative_links.append(
-                f"[{clean(record.get('title'))}]({target})"
-            )
         lines.extend(
             [
                 f"### {category_order[name]:02d} — {name}",
@@ -312,38 +290,9 @@ def main() -> int:
                 f"- 问题定义：{category_definitions[name]}",
                 f"- 跨论文归纳：{category_syntheses[name]}",
                 f"- 支持论文数：{counts[name]}",
-                f"- 代表论文：{'；'.join(representative_links) or '未指定'}",
                 "",
             ]
         )
-    lines.extend(["", "## 分类", ""])
-    for name in ordered_names:
-        lines.extend(
-            [
-                f"### {category_order[name]:02d} — {name}",
-                "",
-                f"- 定义：{category_definitions[name]}",
-                f"- 是否为核心问题：{'是' if category_core_flags.get(name) else '否'}",
-                f"- 论文数量：{counts[name]}",
-                "",
-            ]
-        )
-    lines.extend(["## 论文索引", ""])
-    for category_name in ordered_names:
-        lines.extend([f"### {category_name}", ""])
-        for record in sorted(
-            by_category[category_name],
-            key=lambda item: (-(item.get("year") or 0), clean(item.get("title")).casefold()),
-        ):
-            paper_id = clean(record.get("paper_id"))
-            path = rendered_paths[paper_id].relative_to(args.output)
-            target = urllib.parse.quote(path.as_posix())
-            scope = "全文" if record.get("reading_scope") == "full_text" else "摘要"
-            lines.append(
-                f"- [{clean(record.get('title'))}]({target})"
-                f"（{clean(record.get('year'))}；{scope}）"
-            )
-        lines.append("")
     (args.output / "00-检索与分类总览.md").write_text("\n".join(lines), encoding="utf-8")
 
     print(

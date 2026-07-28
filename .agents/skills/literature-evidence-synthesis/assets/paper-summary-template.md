@@ -11,6 +11,12 @@
 
 {{problem}}
 
+## 问题证据
+
+- 原文摘录：{{problem_evidence_quote}}
+- 证据来源：{{problem_evidence_source}}
+- 位置：{{problem_evidence_location}}
+
 ## 使用了什么方法
 
 {{method}}

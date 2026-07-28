@@ -12,6 +12,7 @@ from typing import Any
 
 
 REQUIRED_ANALYSIS = (
+    "problem_evidence",
     "problem",
     "method",
     "results",
@@ -23,6 +24,7 @@ REQUIRED_ANALYSIS = (
 )
 REQUIRED_HEADINGS = (
     "## 论文解决了什么问题",
+    "## 问题证据",
     "## 使用了什么方法",
     "## 得到了什么结果",
     "## 主要结论",
@@ -33,9 +35,8 @@ REQUIRED_HEADINGS = (
 PAPER_ID_MARKER = re.compile(r"<!--\s*paper_id:\s*([A-Za-z0-9_-]+)\s*-->")
 REQUIRED_OVERVIEW_HEADINGS = (
     "## 领域核心问题",
-    "## 分类",
-    "## 论文索引",
 )
+FORBIDDEN_OVERVIEW_HEADINGS = ("## 分类", "## 论文索引")
 
 
 def parse_args() -> argparse.Namespace:
@@ -62,6 +63,10 @@ def read_jsonl(path: Path) -> tuple[list[dict[str, Any]], list[str]]:
             continue
         records.append(value)
     return records, errors
+
+
+def normalized_text(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip().casefold()
 
 
 def main() -> int:
@@ -95,8 +100,15 @@ def main() -> int:
         for heading in REQUIRED_OVERVIEW_HEADINGS:
             if heading not in overview_content:
                 errors.append(f"Overview missing heading '{heading}'")
+        for heading in FORBIDDEN_OVERVIEW_HEADINGS:
+            if re.search(rf"^{re.escape(heading)}\s*$", overview_content, re.MULTILINE):
+                errors.append(f"Overview must not contain heading '{heading}'")
+        if re.search(r"^- 代表论文：", overview_content, re.MULTILINE):
+            errors.append("Overview core problems must not include representative papers")
         if "因未识别到明确论文问题而跳过：" not in overview_content:
             errors.append("Overview missing no-identifiable-problem skip count")
+        if "具有可核验问题证据：" not in overview_content:
+            errors.append("Overview missing verifiable-problem-evidence count")
 
     ids = [record.get("paper_id") for record in records if record.get("paper_id")]
     duplicate_ids = [value for value, count in Counter(ids).items() if count > 1]
@@ -144,6 +156,8 @@ def main() -> int:
     eligible_ids: set[str] = set()
     abstract_count = 0
     full_text_count = 0
+    completed_problems: dict[str, list[str]] = {}
+    completed_category_reasons: dict[str, list[str]] = {}
     for record in records:
         paper_id = record.get("paper_id") or "<missing-id>"
         for field in ("paper_id", "title", "sources", "analysis_status"):
@@ -175,6 +189,39 @@ def main() -> int:
             for field in REQUIRED_ANALYSIS:
                 if record.get(field) in (None, ""):
                     errors.append(f"{paper_id}: missing {field}")
+            evidence = record.get("problem_evidence")
+            if not isinstance(evidence, dict):
+                errors.append(f"{paper_id}: problem_evidence must be an object")
+            else:
+                for field in ("quote", "source", "location"):
+                    if evidence.get(field) in (None, ""):
+                        errors.append(f"{paper_id}: problem_evidence missing {field}")
+                source = evidence.get("source")
+                if source not in {"abstract", "full_text"}:
+                    errors.append(f"{paper_id}: invalid problem_evidence source={source}")
+                if record.get("reading_scope") == "abstract" and source != "abstract":
+                    errors.append(
+                        f"{paper_id}: abstract-only analysis must use abstract problem evidence"
+                    )
+                quote = normalized_text(evidence.get("quote"))
+                if len(quote) < 15:
+                    errors.append(f"{paper_id}: problem_evidence quote is too short")
+                if len(quote) > 500:
+                    errors.append(f"{paper_id}: problem_evidence quote is not concise")
+                if source == "abstract" and quote not in normalized_text(record.get("abstract")):
+                    errors.append(
+                        f"{paper_id}: problem_evidence quote is not an exact abstract excerpt"
+                    )
+                if quote and quote == normalized_text(record.get("problem")):
+                    errors.append(
+                        f"{paper_id}: problem must paraphrase rather than copy problem_evidence"
+                    )
+            normalized_problem = normalized_text(record.get("problem"))
+            if normalized_problem:
+                completed_problems.setdefault(normalized_problem, []).append(paper_id)
+            normalized_reason = normalized_text(record.get("category_reason"))
+            if normalized_reason:
+                completed_category_reasons.setdefault(normalized_reason, []).append(paper_id)
             if record.get("category") not in category_names:
                 errors.append(f"{paper_id}: category absent from taxonomy")
             if taxonomy_by_paper.get(paper_id) != record.get("category"):
@@ -186,9 +233,32 @@ def main() -> int:
                 errors.append(f"{paper_id}: no_identifiable_problem missing skip_reason")
             if record.get("selected") is not True:
                 errors.append(f"{paper_id}: analyzed skipped paper must keep selected=true")
-            for field in ("problem", "category", "category_reason", "one_sentence_summary"):
+            for field in (
+                "problem_evidence",
+                "problem",
+                "category",
+                "category_reason",
+                "one_sentence_summary",
+            ):
                 if record.get(field) not in (None, ""):
                     errors.append(f"{paper_id}: skipped paper must not contain {field}")
+
+    for problem, paper_ids in completed_problems.items():
+        if len(paper_ids) >= 3:
+            errors.append(
+                "Identical templated problem reused across papers: " + ", ".join(paper_ids)
+            )
+        elif len(paper_ids) == 2:
+            warnings.append(
+                "Identical problem statement reused twice; verify individualization: "
+                + ", ".join(paper_ids)
+            )
+    for reason, paper_ids in completed_category_reasons.items():
+        if len(paper_ids) >= 3:
+            errors.append(
+                "Identical templated category_reason reused across papers: "
+                + ", ".join(paper_ids)
+            )
 
     summary_by_id: dict[str, Path] = {}
     for summary_path in root.glob("[0-9][0-9]-*/*/summary.md"):
