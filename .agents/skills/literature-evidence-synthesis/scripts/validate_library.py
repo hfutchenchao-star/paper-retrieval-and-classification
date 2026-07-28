@@ -1,0 +1,190 @@
+#!/usr/bin/env python3
+"""Validate the generated literature folder tree and its internal data."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+from collections import Counter
+from pathlib import Path
+from typing import Any
+
+
+REQUIRED_ANALYSIS = (
+    "problem",
+    "method",
+    "results",
+    "conclusion",
+    "limitations",
+    "one_sentence_summary",
+    "category",
+    "category_reason",
+)
+REQUIRED_HEADINGS = (
+    "## 论文解决了什么问题",
+    "## 使用了什么方法",
+    "## 得到了什么结果",
+    "## 主要结论",
+    "## 局限性",
+    "## 一句话总结",
+    "## 分类说明",
+)
+PAPER_ID_MARKER = re.compile(r"<!--\s*paper_id:\s*([A-Za-z0-9_-]+)\s*-->")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", type=Path, required=True)
+    parser.add_argument("--strict", action="store_true", help="Treat warnings as errors.")
+    return parser.parse_args()
+
+
+def read_jsonl(path: Path) -> tuple[list[dict[str, Any]], list[str]]:
+    records, errors = [], []
+    if not path.exists():
+        return records, [f"Missing file: {path}"]
+    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError as exc:
+            errors.append(f"{path.name}:{line_number}: invalid JSON: {exc}")
+            continue
+        if not isinstance(value, dict):
+            errors.append(f"{path.name}:{line_number}: record must be an object")
+            continue
+        records.append(value)
+    return records, errors
+
+
+def main() -> int:
+    args = parse_args()
+    root = args.root
+    data_dir = root / "_data"
+    papers_path = data_dir / "papers.jsonl"
+    search_log_path = data_dir / "search-log.jsonl"
+    taxonomy_path = data_dir / "taxonomy.json"
+    overview_path = root / "00-检索与分类总览.md"
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    records, record_errors = read_jsonl(papers_path)
+    errors.extend(record_errors)
+    _, search_errors = read_jsonl(search_log_path)
+    errors.extend(search_errors)
+
+    taxonomy: dict[str, Any] = {}
+    if not taxonomy_path.exists():
+        errors.append(f"Missing file: {taxonomy_path}")
+    else:
+        try:
+            taxonomy = json.loads(taxonomy_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            errors.append(f"Invalid taxonomy JSON: {exc}")
+    if not overview_path.exists():
+        errors.append(f"Missing file: {overview_path}")
+
+    ids = [record.get("paper_id") for record in records if record.get("paper_id")]
+    duplicate_ids = [value for value, count in Counter(ids).items() if count > 1]
+    if duplicate_ids:
+        errors.append("Duplicate paper IDs: " + ", ".join(duplicate_ids))
+
+    taxonomy_categories = taxonomy.get("categories", []) if isinstance(taxonomy, dict) else []
+    if not isinstance(taxonomy_categories, list):
+        errors.append("taxonomy.categories must be a list")
+        taxonomy_categories = []
+    category_names = [item.get("name") for item in taxonomy_categories if isinstance(item, dict)]
+    if len(category_names) != len(set(category_names)):
+        errors.append("Duplicate taxonomy category names")
+    taxonomy_by_paper: dict[str, str] = {}
+    for item in taxonomy_categories:
+        if not isinstance(item, dict):
+            errors.append("Each taxonomy category must be an object")
+            continue
+        name = item.get("name")
+        if not name or not item.get("definition"):
+            errors.append("Taxonomy category missing name or definition")
+        for paper_id in item.get("paper_ids", []):
+            if paper_id in taxonomy_by_paper:
+                errors.append(f"{paper_id}: assigned to multiple taxonomy categories")
+            taxonomy_by_paper[paper_id] = name
+
+    eligible_ids: set[str] = set()
+    abstract_count = 0
+    full_text_count = 0
+    for record in records:
+        paper_id = record.get("paper_id") or "<missing-id>"
+        for field in ("paper_id", "title", "sources", "analysis_status"):
+            if record.get(field) in (None, "", []):
+                errors.append(f"{paper_id}: missing {field}")
+        for field in ("authors", "year", "url"):
+            if record.get(field) in (None, "", []):
+                warnings.append(f"{paper_id}: missing bibliographic field {field}")
+        status = record.get("analysis_status")
+        if status not in {"pending", "complete", "insufficient_text", "excluded"}:
+            errors.append(f"{paper_id}: invalid analysis_status={status}")
+        if status == "complete" and record.get("selected") is True:
+            eligible_ids.add(paper_id)
+            for field in ("year", "url"):
+                if record.get(field) in (None, ""):
+                    errors.append(f"{paper_id}: selected paper missing {field}")
+            if record.get("reading_scope") not in {"abstract", "full_text"}:
+                errors.append(f"{paper_id}: invalid or missing reading_scope")
+            if record.get("reading_scope") == "abstract":
+                abstract_count += 1
+            if record.get("reading_scope") == "full_text":
+                full_text_count += 1
+            for field in REQUIRED_ANALYSIS:
+                if record.get(field) in (None, ""):
+                    errors.append(f"{paper_id}: missing {field}")
+            if record.get("category") not in category_names:
+                errors.append(f"{paper_id}: category absent from taxonomy")
+            if taxonomy_by_paper.get(paper_id) != record.get("category"):
+                errors.append(f"{paper_id}: taxonomy mapping disagrees with paper category")
+        elif status == "insufficient_text" and record.get("abstract"):
+            warnings.append(f"{paper_id}: marked insufficient_text despite having an abstract")
+
+    summary_by_id: dict[str, Path] = {}
+    for summary_path in root.glob("[0-9][0-9]-*/*/summary.md"):
+        content = summary_path.read_text(encoding="utf-8")
+        match = PAPER_ID_MARKER.search(content)
+        if not match:
+            errors.append(f"{summary_path}: missing paper_id marker")
+            continue
+        paper_id = match.group(1)
+        if paper_id in summary_by_id:
+            errors.append(f"{paper_id}: more than one summary.md")
+        summary_by_id[paper_id] = summary_path
+        for heading in REQUIRED_HEADINGS:
+            if heading not in content:
+                errors.append(f"{paper_id}: summary missing heading '{heading}'")
+
+    missing_summaries = sorted(eligible_ids - set(summary_by_id))
+    if missing_summaries:
+        errors.append("Eligible papers missing summary.md: " + ", ".join(missing_summaries))
+    extra_summaries = sorted(set(summary_by_id) - eligible_ids)
+    if extra_summaries:
+        errors.append("Summary files for ineligible/unknown papers: " + ", ".join(extra_summaries))
+
+    known_ids = set(ids)
+    unknown_taxonomy_ids = sorted(set(taxonomy_by_paper) - known_ids)
+    if unknown_taxonomy_ids:
+        errors.append("Taxonomy references unknown paper IDs: " + ", ".join(unknown_taxonomy_ids))
+
+    print(f"Validated {len(records)} paper records")
+    print(
+        f"Summaries: {len(summary_by_id)} "
+        f"({full_text_count} full text, {abstract_count} abstract)"
+    )
+    print(f"Errors: {len(errors)}; warnings: {len(warnings)}")
+    for message in errors:
+        print(f"ERROR: {message}")
+    for message in warnings:
+        print(f"WARNING: {message}")
+    return 1 if errors or (args.strict and warnings) else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
