@@ -31,6 +31,11 @@ REQUIRED_HEADINGS = (
     "## 分类说明",
 )
 PAPER_ID_MARKER = re.compile(r"<!--\s*paper_id:\s*([A-Za-z0-9_-]+)\s*-->")
+REQUIRED_OVERVIEW_HEADINGS = (
+    "## 领域核心问题",
+    "## 分类",
+    "## 论文索引",
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -85,6 +90,13 @@ def main() -> int:
             errors.append(f"Invalid taxonomy JSON: {exc}")
     if not overview_path.exists():
         errors.append(f"Missing file: {overview_path}")
+    else:
+        overview_content = overview_path.read_text(encoding="utf-8")
+        for heading in REQUIRED_OVERVIEW_HEADINGS:
+            if heading not in overview_content:
+                errors.append(f"Overview missing heading '{heading}'")
+        if "因未识别到明确论文问题而跳过：" not in overview_content:
+            errors.append("Overview missing no-identifiable-problem skip count")
 
     ids = [record.get("paper_id") for record in records if record.get("paper_id")]
     duplicate_ids = [value for value, count in Counter(ids).items() if count > 1]
@@ -104,9 +116,27 @@ def main() -> int:
             errors.append("Each taxonomy category must be an object")
             continue
         name = item.get("name")
-        if not name or not item.get("definition"):
-            errors.append("Taxonomy category missing name or definition")
-        for paper_id in item.get("paper_ids", []):
+        if not name or not item.get("definition") or not item.get("synthesis"):
+            errors.append("Taxonomy category missing name, definition, or synthesis")
+        if not isinstance(item.get("is_core"), bool):
+            errors.append(f"{name or '<unnamed>'}: taxonomy is_core must be boolean")
+        paper_ids = item.get("paper_ids", [])
+        if not isinstance(paper_ids, list):
+            errors.append(f"{name or '<unnamed>'}: paper_ids must be a list")
+            paper_ids = []
+        representatives = item.get("representative_paper_ids", [])
+        if not isinstance(representatives, list):
+            errors.append(f"{name or '<unnamed>'}: representative_paper_ids must be a list")
+            representatives = []
+        unknown_representatives = sorted(set(representatives) - set(paper_ids))
+        if unknown_representatives:
+            errors.append(
+                f"{name or '<unnamed>'}: representative papers absent from paper_ids: "
+                + ", ".join(unknown_representatives)
+            )
+        if item.get("is_core") is True and len(paper_ids) < 2:
+            errors.append(f"{name or '<unnamed>'}: core problem needs at least two papers")
+        for paper_id in paper_ids:
             if paper_id in taxonomy_by_paper:
                 errors.append(f"{paper_id}: assigned to multiple taxonomy categories")
             taxonomy_by_paper[paper_id] = name
@@ -123,7 +153,13 @@ def main() -> int:
             if record.get(field) in (None, "", []):
                 warnings.append(f"{paper_id}: missing bibliographic field {field}")
         status = record.get("analysis_status")
-        if status not in {"pending", "complete", "insufficient_text", "excluded"}:
+        if status not in {
+            "pending",
+            "complete",
+            "insufficient_text",
+            "no_identifiable_problem",
+            "excluded",
+        }:
             errors.append(f"{paper_id}: invalid analysis_status={status}")
         if status == "complete" and record.get("selected") is True:
             eligible_ids.add(paper_id)
@@ -145,6 +181,14 @@ def main() -> int:
                 errors.append(f"{paper_id}: taxonomy mapping disagrees with paper category")
         elif status == "insufficient_text" and record.get("abstract"):
             warnings.append(f"{paper_id}: marked insufficient_text despite having an abstract")
+        elif status == "no_identifiable_problem":
+            if record.get("skip_reason") in (None, ""):
+                errors.append(f"{paper_id}: no_identifiable_problem missing skip_reason")
+            if record.get("selected") is not True:
+                errors.append(f"{paper_id}: analyzed skipped paper must keep selected=true")
+            for field in ("problem", "category", "category_reason", "one_sentence_summary"):
+                if record.get(field) not in (None, ""):
+                    errors.append(f"{paper_id}: skipped paper must not contain {field}")
 
     summary_by_id: dict[str, Path] = {}
     for summary_path in root.glob("[0-9][0-9]-*/*/summary.md"):
@@ -172,6 +216,11 @@ def main() -> int:
     unknown_taxonomy_ids = sorted(set(taxonomy_by_paper) - known_ids)
     if unknown_taxonomy_ids:
         errors.append("Taxonomy references unknown paper IDs: " + ", ".join(unknown_taxonomy_ids))
+    ineligible_taxonomy_ids = sorted(set(taxonomy_by_paper) - eligible_ids)
+    if ineligible_taxonomy_ids:
+        errors.append(
+            "Taxonomy references ineligible papers: " + ", ".join(ineligible_taxonomy_ids)
+        )
 
     print(f"Validated {len(records)} paper records")
     print(
