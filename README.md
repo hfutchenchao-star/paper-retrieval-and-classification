@@ -17,11 +17,11 @@
 
 ### 方法一：在 Codex 中通过 GitHub 安装
 
-把下面这句话发给 Codex，并将 `<你的GitHub用户名>` 替换成仓库所有者：
+把下面这句话发给 Codex：
 
 ```text
 $skill-installer 请从
-https://github.com/<你的GitHub用户名>/paper-retrieval-and-classification/tree/main/.agents/skills/literature-evidence-synthesis
+https://github.com/hfutchenchao-star/paper-retrieval-and-classification/tree/main/.agents/skills/literature-evidence-synthesis
 安装这个 skill
 ```
 
@@ -30,7 +30,7 @@ https://github.com/<你的GitHub用户名>/paper-retrieval-and-classification/tr
 ### 方法二：克隆仓库后直接使用
 
 ```bash
-git clone https://github.com/<你的GitHub用户名>/paper-retrieval-and-classification.git
+git clone https://github.com/hfutchenchao-star/paper-retrieval-and-classification.git
 cd paper-retrieval-and-classification
 ```
 
