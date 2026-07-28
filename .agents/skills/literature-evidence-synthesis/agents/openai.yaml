@@ -1,0 +1,4 @@
+interface:
+  display_name: "领域论文搜集、分类与总结"
+  short_description: "按领域和年份搜索论文，分析所解决的问题，并分类生成单篇 Markdown 总结"
+  default_prompt: "Use $literature-evidence-synthesis to find papers in my field, ask me for the year range if I did not provide one, classify papers by the problem they solve, and create one summary.md per paper."
